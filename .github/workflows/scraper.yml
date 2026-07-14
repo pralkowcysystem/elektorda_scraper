@@ -1,0 +1,170 @@
+name: Pralkowcy Elektorda Scraper + Analyzer
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  scraper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 pandas selenium webdriver-manager
+
+      - name: Run Scraper (Phase 2)
+        run: |
+          cd elektorda_scraper
+          python scraper_production.py
+        env:
+          PYTHONUNBUFFERED: 1
+
+      - name: Upload raw data
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: raw-threads
+          path: elektorda_scraper/data/raw/threads_*.json
+          retention-days: 90
+
+      - name: Upload scraper logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: scraper-logs
+          path: elektorda_scraper/logs/scraper_production_*.log
+          retention-days: 90
+
+  analyzer:
+    needs: scraper
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install anthropic pandas
+
+      - name: Download raw data
+        uses: actions/download-artifact@v3
+        with:
+          name: raw-threads
+          path: elektorda_scraper/data/raw/
+
+      - name: Run Analyzer (Phase 3)
+        run: |
+          cd elektorda_scraper
+          python analyzer_claude.py
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PYTHONUNBUFFERED: 1
+
+      - name: Upload analyzed data
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: analyzed-data
+          path: elektorda_scraper/data/parsed/analyzed_*.json
+          retention-days: 90
+
+      - name: Upload SQL inserts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: sql-inserts
+          path: elektorda_scraper/db/inserts_*.sql
+          retention-days: 90
+
+      - name: Upload analyzer logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: analyzer-logs
+          path: elektorda_scraper/logs/analyzer_claude_*.log
+          retention-days: 90
+
+  validator:
+    needs: analyzer
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+
+      - name: Download SQL inserts
+        uses: actions/download-artifact@v3
+        with:
+          name: sql-inserts
+          path: elektorda_scraper/db/
+
+      - name: Run Validator
+        run: |
+          cd elektorda_scraper
+          python validator_sql.py
+
+      - name: Upload validator logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: validator-logs
+          path: elektorda_scraper/logs/validator_sql_*.log
+          retention-days: 90
+
+  report:
+    needs: [scraper, analyzer, validator]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Generate status report
+        run: |
+          echo "========================================"
+          echo "PRALKOWCY SCRAPER - STATUS REPORT"
+          echo "========================================"
+          echo "Scraper: ${{ needs.scraper.result }}"
+          echo "Analyzer: ${{ needs.analyzer.result }}"
+          echo "Validator: ${{ needs.validator.result }}"
+          echo "========================================"
+          echo ""
+          echo "📂 Artifacts available in: Actions > Artifacts"
+          echo "📋 Logs available in: Actions > Artifacts"
+          echo ""
+          if [ "${{ needs.validator.result }}" = "success" ]; then
+            echo "✅ WSZYSTKO OK! SQL ready for Supabase"
+          else
+            echo "❌ Błędy! Sprawdzić logi"
+          fi
