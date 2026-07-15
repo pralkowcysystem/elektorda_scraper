@@ -49,15 +49,15 @@ ch.setFormatter(formatter)
 logger.addHandler(fh)
 logger.addHandler(ch)
 
-TIMEOUT = 30
+TIMEOUT = 60
 TEST_MODE = os.getenv('SCRAPER_TEST_MODE', 'false').lower() == 'true'
 
 if TEST_MODE:
     logger.info("TEST MODE - mala skala")
-    DELAY_MIN = 2
-    DELAY_MAX = 3
+    DELAY_MIN = 5
+    DELAY_MAX = 10
     MAX_THREADS_PER_NIGHT = 10
-    CATEGORIES_TO_SCRAPE = ['zmywarka']
+    CATEGORIES_TO_SCRAPE = ['suszarka']
 else:
     logger.info("PRODUCTION MODE - pelna skala")
     DELAY_MIN = 10
