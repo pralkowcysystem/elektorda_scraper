@@ -33,7 +33,7 @@ jobs:
           pip install requests beautifulsoup4 pandas selenium webdriver-manager
 
       - name: Run Scraper (Phase 2)
-        run: python scraper_production.py
+        run: python elektorda_scraper/scraper_production.py
         env:
           PYTHONUNBUFFERED: 1
           SCRAPER_TEST_MODE: 'true'
@@ -44,7 +44,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: raw-threads
-          path: data/raw/threads_*.json
+          path: elektorda_scraper/data/raw/threads_*.json
           retention-days: 90
 
       - name: Upload scraper logs
@@ -52,7 +52,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: scraper-logs
-          path: logs/scraper_production_*.log
+          path: elektorda_scraper/logs/scraper_production_*.log
           retention-days: 90
 
   analyzer:
@@ -78,10 +78,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: raw-threads
-          path: data/raw/
+          path: elektorda_scraper/data/raw/
 
       - name: Run Analyzer (Phase 3)
-        run: python analyzer_claude.py
+        run: python elektorda_scraper/analyzer_claude.py
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PYTHONUNBUFFERED: 1
@@ -92,7 +92,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: analyzed-data
-          path: data/parsed/analyzed_*.json
+          path: elektorda_scraper/data/parsed/analyzed_*.json
           retention-days: 90
 
       - name: Upload SQL inserts
@@ -100,7 +100,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sql-inserts
-          path: db/inserts_*.sql
+          path: elektorda_scraper/db/inserts_*.sql
           retention-days: 90
 
       - name: Upload analyzer logs
@@ -108,7 +108,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: analyzer-logs
-          path: logs/analyzer_claude_*.log
+          path: elektorda_scraper/logs/analyzer_claude_*.log
           retention-days: 90
 
   validator:
@@ -133,10 +133,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: sql-inserts
-          path: db/
+          path: elektorda_scraper/db/
 
       - name: Run Validator
-        run: python validator_sql.py
+        run: python elektorda_scraper/validator_sql.py
         timeout-minutes: 15
 
       - name: Upload validator logs
@@ -144,7 +144,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: validator-logs
-          path: logs/validator_sql_*.log
+          path: elektorda_scraper/logs/validator_sql_*.log
           retention-days: 90
 
   report:
