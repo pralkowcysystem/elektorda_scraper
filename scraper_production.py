@@ -350,3 +350,54 @@ def main():
 
     for cat_name, search_term in selected_categories.items():
         threads = scrape_category(cat_name, search_term)
+        all_threads.extend(threads)
+
+    logger.info("")
+    logger.info("="*80)
+    logger.info(f"RAZEM ZEBRANO: {len(all_threads)} watkow")
+    logger.info("="*80)
+    logger.info("")
+
+    if not all_threads:
+        logger.warning("Brak nowych watkow do zapisania!")
+        return
+
+    # Filtruj duplikaty
+    new_threads = []
+    new_urls = set()
+
+    for thread in all_threads:
+        url = thread['url']
+        if url not in already_scraped and url not in new_urls:
+            new_threads.append(thread)
+            new_urls.add(url)
+
+    logger.info(f"Po deduplikacji: {len(new_threads)} NOWYCH watkow")
+    logger.info("")
+
+    # Zapisz do pliku
+    if new_threads:
+        today = datetime.now().strftime("%Y-%m-%d")
+        output_file = RAW_DIR / f"threads_{today}.json"
+
+        try:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(new_threads, f, ensure_ascii=False, indent=2)
+
+            logger.info(f"Zapisano: {output_file.name}")
+            logger.info(f"Rozmiar: {output_file.stat().st_size} bajtow")
+
+            # Zaktualizuj checkpoint
+            all_urls = already_scraped | new_urls
+            save_checkpoint(all_urls)
+
+            logger.info("")
+            logger.info("="*80)
+            logger.info("SUKCES!")
+            logger.info("="*80)
+
+        except Exception as e:
+            logger.error(f"Blad zapisu: {e}")
+
+if __name__ == "__main__":
+    main()
