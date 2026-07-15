@@ -22,6 +22,11 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      - name: Install Chrome for Selenium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser chromium-chromedriver
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -33,10 +38,12 @@ jobs:
           python scraper_production.py
         env:
           PYTHONUNBUFFERED: 1
+          SCRAPER_TEST_MODE: 'true'
+        timeout-minutes: 180
 
       - name: Upload raw data
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: raw-threads
           path: elektorda_scraper/data/raw/threads_*.json
@@ -44,7 +51,7 @@ jobs:
 
       - name: Upload scraper logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: scraper-logs
           path: elektorda_scraper/logs/scraper_production_*.log
@@ -70,7 +77,7 @@ jobs:
           pip install anthropic pandas
 
       - name: Download raw data
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: raw-threads
           path: elektorda_scraper/data/raw/
@@ -82,10 +89,11 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PYTHONUNBUFFERED: 1
+        timeout-minutes: 90
 
       - name: Upload analyzed data
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: analyzed-data
           path: elektorda_scraper/data/parsed/analyzed_*.json
@@ -93,7 +101,7 @@ jobs:
 
       - name: Upload SQL inserts
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sql-inserts
           path: elektorda_scraper/db/inserts_*.sql
@@ -101,7 +109,7 @@ jobs:
 
       - name: Upload analyzer logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: analyzer-logs
           path: elektorda_scraper/logs/analyzer_claude_*.log
@@ -126,7 +134,7 @@ jobs:
           python -m pip install --upgrade pip
 
       - name: Download SQL inserts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: sql-inserts
           path: elektorda_scraper/db/
@@ -135,10 +143,11 @@ jobs:
         run: |
           cd elektorda_scraper
           python validator_sql.py
+        timeout-minutes: 15
 
       - name: Upload validator logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: validator-logs
           path: elektorda_scraper/logs/validator_sql_*.log
