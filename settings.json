@@ -1,0 +1,23 @@
+﻿{
+  "scraper": {
+    "url": "https://elektorda.pl",
+    "delay_min_sec": 7,
+    "delay_max_sec": 10,
+    "max_requests_per_day": 50,
+    "timeout_sec": 30
+  },
+  "google_drive": {
+    "enabled": false,
+    "spreadsheet_id": "YOUR_SHEET_ID",
+    "parent_folder_id": "YOUR_FOLDER_ID",
+    "credentials_file": "config/pralkowcy-scraper-04aaed542e48.json"
+  },
+  "supabase": {
+    "enabled": true
+  },
+  "logging": {
+    "level": "INFO",
+    "to_console": true,
+    "to_file": true
+  }
+}

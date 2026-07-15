@@ -1,0 +1,703 @@
+#!/usr/bin/env python3
+"""
+SCRAPER V2 PHASE 2 - WCHODZENIE W WĄTKI
+Dla każdego zebranego topic URL - wchodzi i wyciąga RZECZYWISTY tytuł z <h1>
+
+Author: Claude (Pralkowcy)
+Date: 2026-07-14
+"""
+
+import os
+import sys
+import json
+import time
+import random
+import logging
+from datetime import datetime
+from pathlib import Path
+from typing import List, Dict, Optional
+
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.service import Service
+
+# =============================================================================
+# KONFIGURACJA
+# =============================================================================
+
+PROJECT_ROOT = Path(__file__).parent  # ✅ NAPRAWIONE! Jeden level wyżej (elektorda_scraper/)
+DATA_DIR = PROJECT_ROOT / "data"
+RAW_DIR = DATA_DIR / "raw"
+PARSED_DIR = DATA_DIR / "parsed"
+LOGS_DIR = PROJECT_ROOT / "logs"
+DEDUP_DIR = DATA_DIR / "dedup"  # ← Deduplikacja
+
+for d in [LOGS_DIR, RAW_DIR, PARSED_DIR, DEDUP_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
+
+# Logger
+def setup_logger():
+    logger = logging.getLogger("scraper_v2_phase2")
+    logger.setLevel(logging.DEBUG)
+
+    log_file = LOGS_DIR / f"scraper_v2_phase2_{datetime.now().strftime('%Y-%m-%d')}.log"
+    fh = logging.FileHandler(log_file, encoding='utf-8')
+    fh.setLevel(logging.DEBUG)
+
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    fh.setFormatter(formatter)
+    ch.setFormatter(formatter)
+
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+    return logger
+
+logger = setup_logger()
+
+TIMEOUT = 30
+
+# ⚠️ TEST MODE — zmniejszone dla szybkiego testu
+# Zmień tutaj jeśli chcesz pełny run:
+TEST_MODE = True
+if TEST_MODE:
+    DELAY_MIN = 2   # Test: szybko
+    DELAY_MAX = 3
+    MAX_THREADS_PER_NIGHT = 50  # Test: mało
+else:
+    DELAY_MIN = 10  # Production: bezpiecze
+    DELAY_MAX = 12
+    MAX_THREADS_PER_NIGHT = 800
+
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+# =============================================================================
+# PARSING HELPERS
+# =============================================================================
+
+BRANDS = [
+    'Bosch', 'Siemens', 'LG', 'Samsung', 'Whirlpool', 'Ariston', 'Indesit',
+    'Electrolux', 'AEG', 'Zanussi', 'Beko', 'Candy', 'Hotpoint', 'Miele',
+    'IKEA', 'Privileg', 'Constructa', 'Neff', 'Bauknecht', 'Gorenje', 'Vestel'
+]
+
+DEVICES = {
+    'pralka': ['pralka', 'washer', 'washing'],
+    'zmywarka': ['zmywarka', 'dishwasher', 'zmywarek'],
+    'suszarka': ['suszarka', 'dryer'],
+    'piekarnik': ['piekarnik', 'oven', 'piekarn'],
+}
+
+SYMPTOMS = {
+    'nie wiruje': ['nie wiruje', 'nie obraca', 'bęben nie obraca'],
+    'bierze wodę': ['bierze wodę', 'pobiera wodę', 'nie bierze wody'],
+    'nie grzeje': ['nie grzeje', 'zimna woda'],
+    'przecieka': ['przecieka', 'wycieka woda'],
+    'hałas': ['hałas', 'rzęzi', 'śrinka'],
+    'nie otwiera': ['nie otwiera drzwi', 'zablokowane drzwi'],
+    'błąd wyświetlacza': ['błąd', 'kod', 'error'],
+}
+
+import re
+
+# =============================================================================
+# DEDUPLIKACJA & CHECKPOINT
+# =============================================================================
+
+def load_already_scraped() -> set:
+    """Wczytaj zbiór URL-i już zebranych"""
+    dedup_file = DEDUP_DIR / "already_scraped_urls.json"
+
+    if dedup_file.exists():
+        with open(dedup_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            urls = set(data.get('urls', []))
+            logger.info(f"✅ Wczytano {len(urls)} już zebranych URL-i")
+            return urls
+
+    logger.info("ℹ️  Pierwsza sesja — brak poprzednich danych")
+    return set()
+
+def save_already_scraped(urls: set):
+    """Zapisz URL-i które zebraliśmy"""
+    dedup_file = DEDUP_DIR / "already_scraped_urls.json"
+
+    with open(dedup_file, 'w', encoding='utf-8') as f:
+        json.dump({
+            'urls': list(urls),
+            'count': len(urls),
+            'last_updated': datetime.now().isoformat()
+        }, f, ensure_ascii=False, indent=2)
+
+def extract_brand(title: str) -> Optional[str]:
+    for brand in BRANDS:
+        if brand.lower() in title.lower():
+            return brand
+    return None
+
+def extract_device(title: str) -> Optional[str]:
+    for device, keywords in DEVICES.items():
+        for keyword in keywords:
+            if keyword.lower() in title.lower():
+                return device
+    return None
+
+def extract_error_code(title: str) -> Optional[str]:
+    patterns = [
+        r'\b[EeFfAaCcDdHh]\-?\d{1,3}\b',
+        r'(?:Error|Błąd|error|błąd)\s*[EeFfAaCcDdHh]?\-?\d{1,3}',
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, title, re.IGNORECASE)
+        if match:
+            return match.group(0).strip()
+    return None
+
+def extract_symptoms(title: str) -> List[str]:
+    symptoms = []
+    for symptom, keywords in SYMPTOMS.items():
+        for keyword in keywords:
+            if keyword.lower() in title.lower():
+                symptoms.append(symptom)
+                break
+    return symptoms
+
+# =============================================================================
+# PHASE 2: POBIERANIE TYTUŁÓW Z WĄTKÓW
+# =============================================================================
+
+def fetch_thread_full(url: str) -> Optional[Dict]:
+    """Wchodzi w topic URL i wyciąga TYTUŁ + ZAWARTOŚĆ"""
+    try:
+        response = requests.get(
+            url,
+            headers={"User-Agent": USER_AGENT},
+            timeout=TIMEOUT
+        )
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # Tytuł - SPRÓBUJ RÓŻNE SELEKTORY
+        title = None
+
+        # Spróba 1: <h1>
+        h1 = soup.find('h1')
+        if h1:
+            title = h1.get_text(strip=True)
+            logger.debug(f"  Found title in <h1>: {title[:50]}")
+
+        # Spróba 2: span.topic-title
+        if not title:
+            span = soup.find('span', class_=['topic-title', 'page-title'])
+            if span:
+                title = span.get_text(strip=True)
+                logger.debug(f"  Found title in <span>: {title[:50]}")
+
+        # Spróba 3: meta og:title
+        if not title:
+            og_title = soup.find('meta', {'property': 'og:title'})
+            if og_title:
+                title = og_title.get('content', '').strip()
+                logger.debug(f"  Found title in <meta>: {title[:50]}")
+
+        # Spróba 4: <title> tag
+        if not title:
+            title_tag = soup.find('title')
+            if title_tag:
+                title = title_tag.get_text(strip=True)
+                logger.debug(f"  Found title in <title>: {title[:50]}")
+
+        # Fallback - zaakceptuj nawet krótki tytuł
+        if not title:
+            logger.debug(f"  No title found, creating default")
+            title = f"Topic from {url}"  # ← FALLBACK
+
+        logger.debug(f"  Final title: {title[:50]}")
+
+        # Zawartość całego wątku (wszystkie posty)
+        content_parts = []
+
+        # Szukaj głównej zawartości
+        main_content = soup.find('div', class_=['topic-content', 'thread-content', 'post-content'])
+        if not main_content:
+            main_content = soup.find('article')
+        if not main_content:
+            main_content = soup.find('div', class_='content')
+
+        # Zbierz wszystkie posty/odpowiedzi
+        posts = soup.find_all('div', class_=['post', 'reply', 'message'])
+        if not posts:
+            posts = soup.find_all('div', class_=re.compile(r'(post|reply|message|comment)'))
+
+        if posts:
+            for post in posts:
+                post_text = post.get_text(strip=True)
+                if post_text:
+                    content_parts.append(post_text)
+        elif main_content:
+            content_parts.append(main_content.get_text(strip=True))
+        else:
+            # Fallback: zbierz body
+            body = soup.find('body')
+            if body:
+                content_parts.append(body.get_text(strip=True))
+
+        content = "\n\n---\n\n".join(content_parts[:20])  # Max 20 postów
+
+        return {
+            'title': title,
+            'content': content[:5000],  # Max 5KB zawartości
+            'content_length': len(content)
+        }
+
+    except requests.Timeout:
+        logger.warning(f"⏱️  Timeout: {url}")
+        return None
+    except Exception as e:
+        logger.debug(f"❌ Błąd przy {url}: {e}")
+        return None
+
+def enrich_threads_with_full_data(raw_threads: List[Dict]) -> List[Dict]:
+    """Wzbogaca surowe wątki: TYTUŁ + PEŁNĄ ZAWARTOŚCIĄ
+
+    Strategy:
+    1. Wczytaj już zebrane URLs (dedup)
+    2. Posortuj reverse (najnowsze najpierw)
+    3. Filtruj duplikaty
+    4. Zbierz nowe
+    5. Zapisz checkpoint
+    """
+    logger.info("\n" + "=" * 80)
+    logger.info("PHASE 2 V2: POBIERANIE TYTUŁÓW + ZAWARTOŚCI WĄTKÓW")
+    logger.info("=" * 80)
+
+    # 1. Wczytaj już zebrane
+    already_scraped = load_already_scraped()
+    logger.info(f"🔄 Deduplikacja: pomiń {len(already_scraped)} znanych URL-i")
+
+    # 2. Posortuj reverse (najnowsze najpierw)
+    # Zakładamy że raw_threads mają 'timestamp' - jeśli nie, idziemy od końca
+    sorted_threads = sorted(raw_threads, key=lambda x: x.get('timestamp', ''), reverse=True)
+    logger.info(f"📅 Sortowanie: najnowsze najpierw")
+
+    # 3. Filtruj duplikaty + limit
+    new_threads = []
+    for thread in sorted_threads:
+        if thread['url'] not in already_scraped and len(new_threads) < MAX_THREADS_PER_NIGHT:
+            new_threads.append(thread)
+
+    logger.info(f"✅ Wątków do zebrania: {len(new_threads)} (nowych)")
+    logger.info(f"Delay: {DELAY_MIN}-{DELAY_MAX}s (Czas: ~{len(new_threads) * ((DELAY_MIN + DELAY_MAX) / 2) / 3600:.1f}h)\n")
+
+    enriched = []
+    success_count = 0
+    fail_count = 0
+    start_time = time.time()
+    processed_urls = already_scraped.copy()
+
+    for i, thread in enumerate(new_threads, 1):
+        url = thread['url']
+
+        try:
+            # Pobierz tytuł + zawartość
+            full_data = fetch_thread_full(url)
+
+            if full_data:
+                enriched_thread = thread.copy()
+                enriched_thread['title'] = full_data['title']
+                enriched_thread['content'] = full_data['content']
+                enriched_thread['content_length'] = full_data['content_length']
+                enriched_thread['brand'] = extract_brand(full_data['title'])
+                enriched_thread['device'] = extract_device(full_data['title'])
+                enriched_thread['error_code'] = extract_error_code(full_data['title'])
+                enriched_thread['symptoms'] = extract_symptoms(full_data['title'])
+                enriched_thread['scraped_at'] = datetime.now().isoformat()
+
+                enriched.append(enriched_thread)
+                processed_urls.add(url)  # ← Dodaj do checkpoint
+                success_count += 1
+
+                if i % 50 == 0:
+                    elapsed = time.time() - start_time
+                    rate = i / (elapsed / 60)  # wątków/min
+                    remaining = (len(new_threads) - i) / rate if rate > 0 else 0
+                    logger.info(f"✅ {i}/{len(new_threads)} | Tempo: {rate:.1f}/min | ETA: {remaining:.0f}min")
+
+                    # ← Checkpoint co 50 wątków
+                    save_already_scraped(processed_urls)
+                    logger.info(f"💾 Checkpoint: zapisano {len(processed_urls)} URL-i")
+            else:
+                fail_count += 1
+
+        except KeyboardInterrupt:
+            logger.warning("⚠️  Przerwano przez użytkownika")
+            logger.info(f"Zebrano: {success_count} wątków (pełne dane)")
+            # Zapisz checkpoint przed wyjściem!
+            save_already_scraped(processed_urls)
+            logger.info(f"💾 Checkpoint: zapisano {len(processed_urls)} URL-i przed wyłączeniem")
+            break
+        except Exception as e:
+            logger.error(f"❌ Błąd w wątku {i}: {e}")
+            fail_count += 1
+
+        # Delay bezpieczeństwa
+        delay = random.uniform(DELAY_MIN, DELAY_MAX)
+        time.sleep(delay)
+
+    elapsed_time = (time.time() - start_time) / 3600
+    logger.info(f"\n{'=' * 80}")
+    logger.info(f"✅ Sukcesy: {success_count}")
+    logger.info(f"❌ Błędy: {fail_count}")
+    if len(new_threads) > 0:
+        logger.info(f"📊 Wskaźnik sukcesu: {success_count / len(new_threads) * 100:.1f}%")
+    logger.info(f"⏱️  Czas: {elapsed_time:.2f}h")
+    logger.info(f"{'=' * 80}")
+
+    # 💾 FINALNY CHECKPOINT
+    save_already_scraped(processed_urls)
+    logger.info(f"💾 FINALNY CHECKPOINT: {len(processed_urls)} URL-i zapisanych")
+    logger.info(f"✅ Następny scraping zacznie od wątków po numerze {len(processed_urls)}")
+
+    return enriched
+
+# =============================================================================
+# DEDUPLIKACJA
+# =============================================================================
+
+def deduplicate(threads: List[Dict]) -> Dict[tuple, Dict]:
+    """Deduplikuj wątki po (brand, device, error_code, symptom)"""
+    logger.info("\n" + "=" * 80)
+    logger.info("DEDUPLIKACJA")
+    logger.info("=" * 80)
+
+    dedup_map = {}
+
+    for thread in threads:
+        # Filtruj: tylko wątki z przynajmniej jedną wartością
+        if not any([thread['brand'], thread['device'], thread['error_code'], thread['symptoms']]):
+            continue
+
+        key = (
+            thread['brand'] or 'unknown',
+            thread['device'] or 'unknown',
+            thread['error_code'] or 'unknown',
+            tuple(sorted(thread['symptoms'])) or ('unknown',)
+        )
+
+        if key not in dedup_map:
+            dedup_map[key] = {
+                'brand': thread['brand'],
+                'device': thread['device'],
+                'error_code': thread['error_code'],
+                'symptoms': thread['symptoms'],
+                'count': 0,
+                'urls': [],
+                'titles': [],
+                'first_title': thread['title'],
+                'last_updated': thread['timestamp']
+            }
+
+        dedup_map[key]['count'] += 1
+        dedup_map[key]['urls'].append(thread['url'])
+        dedup_map[key]['titles'].append(thread['title'])
+        dedup_map[key]['last_updated'] = thread['timestamp']
+
+    logger.info(f"Wzbogacone wątki: {len(threads)}")
+    logger.info(f"Unikalne problemy: {len(dedup_map)}")
+    if len(threads) > 0:
+        logger.info(f"Redukcja: {100 - int(len(dedup_map) / len(threads) * 100)}%")
+
+    return dedup_map
+
+# =============================================================================
+# ZAPISYWANIE
+# =============================================================================
+
+def save_results(enriched_threads: List[Dict], dedup_map: Dict):
+    """Zapisz wyniki"""
+    logger.info("\n" + "=" * 80)
+    logger.info("ZAPISYWANIE DANYCH")
+    logger.info("=" * 80)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    PARSED_DIR.mkdir(parents=True, exist_ok=True)
+
+    # ✅ PEŁNE DANE — TYMCZASOWO DO /LOGS DLA PREVIEW WIDGETU
+    try:
+        # ℹ️  ZAMIAST RAW_DIR -> LOGS_DIR (do wygodnego dostępu z czatu)
+        preview_file = LOGS_DIR / "preview_threads.json"
+        logger.info(f"📍 ZAPISUJĘ PREVIEW: {preview_file}")
+        logger.info(f"📊 Ilość wątków: {len(enriched_threads)}")
+
+        with open(preview_file, 'w', encoding='utf-8') as f:
+            json.dump(enriched_threads, f, ensure_ascii=False, indent=2)
+
+        logger.info(f"✅ PREVIEW zapisany: {preview_file.name}")
+
+        # ✅✅ WERYFIKACJA ZAPISU (WAŻNE!)
+        import time
+        time.sleep(0.5)  # Czekaj aby OS zakończył zapis
+
+        if preview_file.exists():
+            file_size = preview_file.stat().st_size
+            logger.info(f"✅✅ PLIK ISTNIEJE: {file_size} bajtów")
+            if file_size > 100:  # Podstawowa sanity check
+                logger.info(f"✅✅✅ PLIK MA ZAWARTOŚĆ - SUKCES!")
+            else:
+                logger.error(f"⚠️  PLIK ISTNIEJE ALE JEST PUSTY!")
+        else:
+            logger.error(f"❌❌ PLIK NIE ISTNIEJE PO ZAPISANIU! Sprawdź ścieżkę!")
+            logger.error(f"Próbowałem: {preview_file.absolute()}")
+    except Exception as e:
+        logger.error(f"❌ BŁĄD ZAPISU: {e}", exc_info=True)
+
+    # JSON wzbogacone wątki (metadata bez zawartości)
+    enriched_file = PARSED_DIR / f"enriched_threads_metadata_{today}.json"
+    metadata_threads = [
+        {k: v for k, v in t.items() if k != 'content'}
+        for t in enriched_threads
+    ]
+    with open(enriched_file, 'w', encoding='utf-8') as f:
+        json.dump(metadata_threads, f, ensure_ascii=False, indent=2)
+    logger.info(f"✅ Metadata wątków: {enriched_file.name}")
+
+    # JSON deduplikowane
+    dedup_file = PARSED_DIR / f"deduplicated_final_{today}.json"
+    dedup_list = [
+        {
+            'brand': v['brand'],
+            'device': v['device'],
+            'error_code': v['error_code'],
+            'symptoms': v['symptoms'],
+            'count': v['count'],
+            'urls': v['urls'],
+            'titles': v['titles'],
+            'first_title': v['first_title'],
+            'last_updated': v['last_updated']
+        }
+        for v in sorted(dedup_map.values(), key=lambda x: x['count'], reverse=True)
+    ]
+
+    with open(dedup_file, 'w', encoding='utf-8') as f:
+        json.dump(dedup_list, f, ensure_ascii=False, indent=2)
+    logger.info(f"✅ Deduplikowane: {dedup_file.name}")
+
+    # CSV
+    csv_file = DATA_DIR / f"baza_wiedzy_final_{today}.csv"
+    df = pd.DataFrame([
+        {
+            'Marka': v['brand'],
+            'Urządzenie': v['device'],
+            'Kod Błędu': v['error_code'],
+            'Symptomy': ', '.join(v['symptoms']) if v['symptoms'] else 'n/a',
+            'Ile Razy': v['count'],
+            'Przykładowy Tytuł': v['first_title'][:80] if v['first_title'] else 'n/a',
+        }
+        for v in sorted(dedup_map.values(), key=lambda x: x['count'], reverse=True)
+    ])
+
+    df.to_csv(csv_file, index=False, encoding='utf-8')
+    logger.info(f"✅ CSV: {csv_file.name}")
+
+    logger.info("\n" + "=" * 80)
+    logger.info("📊 PODSUMOWANIE")
+    logger.info("=" * 80)
+    logger.info(f"Wzbogacone wątki: {len(enriched_threads)}")
+    logger.info(f"Unikalne problemy: {len(dedup_map)}")
+    if len(enriched_threads) > 0:
+        logger.info(f"Średnia wątków na problem: {len(enriched_threads) / len(dedup_map):.1f}")
+        avg_content = sum(t.get('content_length', 0) for t in enriched_threads) / len(enriched_threads)
+        logger.info(f"Średnia zawartości: {avg_content:.0f} znaków")
+
+    logger.info(f"\n💾 Pliki gotowe do Phase 3 (analizy):")
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def collect_threads_from_search() -> List[Dict]:
+    """Zbiera rzeczywiste wątki z wyszukiwania elektorda (SELENIUM)"""
+    logger.info("📍 Zbieranie wątków z wyszukiwania elektorda (SELENIUM)...")
+
+    # Szukane terminy (kategorie urządzeń)
+    search_terms = {
+        'pralka': 'pralka',
+        'zmywarka': 'zmywarka',
+        'suszarka': 'suszarka',
+        'piekarnik': 'piekarnik',
+    }
+
+    all_threads = []
+    base_search_url = 'https://www.elektroda.pl/rtvforum/find.php?q='
+
+    # Inicjuj Selenium Chrome driver
+    try:
+        options = webdriver.ChromeOptions()
+        options.add_argument('--start-maximized')
+        options.add_argument(f'user-agent={USER_AGENT}')
+        options.add_argument('--disable-blink-features=AutomationControlled')
+
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        logger.info("✅ Chrome driver uruchomiony")
+
+    except Exception as e:
+        logger.error(f"❌ Błąd inicjalizacji Selenium: {e}")
+        return []
+
+    try:
+        for category_name, search_term in search_terms.items():
+            logger.info(f"🔍 Wyszukiwanie: {category_name.upper()}")
+
+            try:
+                # Zbuduj URL wyszukiwania
+                search_url = f"{base_search_url}{search_term}"
+                logger.info(f"   URL: {search_url}")
+
+                # Wczytaj stronę w Selenium
+                driver.get(search_url)
+
+                # Czekaj na załadowanie strony
+                time.sleep(2)
+
+                # Zaakceptuj popup'i automatycznie (cookies + polityka prywatności)
+                try:
+                    # Szukaj przycisku "Akceptuję" (może być w różnych formach)
+                    accept_button = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH,
+                            "//button[contains(text(), 'Akceptuj') or contains(text(), 'Akceptuję') or contains(text(), 'Accept')]"
+                        ))
+                    )
+                    accept_button.click()
+                    logger.info("  ✅ Zaakceptowano popup")
+                    time.sleep(2)
+                except:
+                    logger.info("  ℹ️  Brak popup'u do zaakceptowania")
+
+                # Czekaj na załadowanie wyników wyszukiwania (konkretna klasa/id)
+                # Szukamy elementu zawierającego wyniki
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_elements_located((By.CLASS_NAME, "search-result"))
+                    )
+                    logger.info("  ✅ Wyniki wyszukiwania załadowane")
+                except:
+                    logger.info("  ℹ️  Oczekiwanie timeout - kontynuuję")
+
+                time.sleep(2)  # Czekaj na pełne załadowanie JS'a
+
+                # Pobierz HTML ze strony (z JavaScriptem!)
+                page_source = driver.page_source
+
+                # DEBUG: Zapisz HTML do pliku
+                debug_file = LOGS_DIR / f"debug_html_{category_name}.html"
+                with open(debug_file, 'w', encoding='utf-8') as f:
+                    f.write(page_source)
+                logger.info(f"  💾 HTML zapisany: {debug_file.name}")
+
+                soup = BeautifulSoup(page_source, 'html.parser')
+
+                # Szukaj linków do wątków w wynikach
+                thread_links = soup.find_all('a', href=True)
+                logger.info(f"  DEBUG: Znaleziono WSZYSTKICH linków: {len(thread_links)}")
+
+                # Filtruj linki zawierające "showthread"
+                thread_links = [l for l in thread_links if 'showthread.php' in l.get('href', '')]
+                logger.info(f"  DEBUG: Linków ze 'showthread': {len(thread_links)}")
+
+                logger.info(f"  ✅ Znaleziono: {len(thread_links)} wątków")
+
+                for i, link in enumerate(thread_links[:MAX_THREADS_PER_NIGHT]):
+                    href = link.get('href', '')
+                    if 'showthread.php' in href:
+                        # Pełny URL
+                        if href.startswith('http'):
+                            thread_url = href
+                        else:
+                            thread_url = f"https://www.elektroda.pl/rtvforum/{href}"
+
+                        all_threads.append({
+                            'url': thread_url,
+                            'category': category_name,
+                            'title': link.get_text(strip=True),
+                            'timestamp': datetime.now().isoformat()
+                        })
+
+                # Delay między kategoriami (WAŻNE!)
+                delay = random.uniform(DELAY_MIN, DELAY_MAX)
+                logger.info(f"  ⏳ Delay między kategoriami: {delay:.1f}s")
+                time.sleep(delay)
+
+            except Exception as e:
+                logger.error(f"  ❌ Błąd w wyszukiwaniu '{category_name}': {e}")
+                continue
+
+    finally:
+        # Zamknij driver
+        driver.quit()
+        logger.info("✅ Chrome driver zamknięty")
+
+    logger.info(f"\n✅ Razem zebrano: {len(all_threads)} wątków")
+
+    # Zapisz do pliku (backup)
+    if all_threads:
+        backup_file = RAW_DIR / f"discovered_threads_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
+        with open(backup_file, 'w', encoding='utf-8') as f:
+            json.dump(all_threads, f, ensure_ascii=False, indent=2)
+        logger.info(f"💾 Backup zapisany: {backup_file.name}")
+
+    return all_threads
+
+def main():
+    try:
+        logger.info("=" * 80)
+        logger.info("SCRAPER V2 PHASE 2 - PREVIEW MODE (HARDCODED URLs)")
+        logger.info("=" * 80)
+
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        # ✅ ZAMIAST SELENIUM - HARDCODED RZECZYWISTE URLe z elektorda
+        # Te URL'i wyciągnąłem z debug_html_pralka.html
+        hardcoded_urls = [
+            "https://www.elektroda.pl/rtvforum/topic2261062.html",
+            "https://www.elektroda.pl/rtvforum/topic4121492.html",
+            "https://www.elektroda.pl/rtvforum/topic578812.html",
+            "https://www.elektroda.pl/rtvforum/topic3109024.html",
+            "https://www.elektroda.pl/rtvforum/topic3222865.html",
+            "https://www.elektroda.pl/rtvforum/topic3670139.html",
+            "https://www.elektroda.pl/rtvforum/topic3941361.html",
+            "https://www.elektroda.pl/rtvforum/topic3622833.html",
+            "https://www.elektroda.pl/rtvforum/topic3149785.html",
+            "https://www.elektroda.pl/rtvforum/topic2439221.html",
+        ]
+
+        logger.info(f"📋 Używam {len(hardcoded_urls)} hardcoded URL'i (PREVIEW)")
+        logger.info(f"Opis: Dane z debug_html_pralka.html - do testowania widgetu\n")
+
+        # Konwertuj na format raw_threads
+        raw_threads = [
+            {
+                'url': url,
+                'category': 'pralka',
+                'title': f'Topic {url.split("/")[-1].replace(".html", "")}',
+                'timestamp': datetime.now().isoformat()
+            }
+            for url in hardcoded_urls
+        ]
+
+        if not raw_threads:
+            logger.error("❌ Brak wątków do zbi
