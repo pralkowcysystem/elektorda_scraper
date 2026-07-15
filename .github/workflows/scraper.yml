@@ -12,6 +12,7 @@ jobs:
   scraper:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    working-directory: elektorda_scraper
 
     steps:
       - name: Checkout code
@@ -33,7 +34,7 @@ jobs:
           pip install requests beautifulsoup4 pandas selenium webdriver-manager
 
       - name: Run Scraper (Phase 2)
-        run: python elektorda_scraper/scraper_production.py
+        run: python scraper_production.py
         env:
           PYTHONUNBUFFERED: 1
           SCRAPER_TEST_MODE: 'true'
@@ -59,6 +60,7 @@ jobs:
     needs: scraper
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    working-directory: elektorda_scraper
 
     steps:
       - name: Checkout code
@@ -81,7 +83,7 @@ jobs:
           path: elektorda_scraper/data/raw/
 
       - name: Run Analyzer (Phase 3)
-        run: python elektorda_scraper/analyzer_claude.py
+        run: python analyzer_claude.py
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PYTHONUNBUFFERED: 1
@@ -115,6 +117,7 @@ jobs:
     needs: analyzer
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    working-directory: elektorda_scraper
 
     steps:
       - name: Checkout code
@@ -136,7 +139,7 @@ jobs:
           path: elektorda_scraper/db/
 
       - name: Run Validator
-        run: python elektorda_scraper/validator_sql.py
+        run: python validator_sql.py
         timeout-minutes: 15
 
       - name: Upload validator logs
