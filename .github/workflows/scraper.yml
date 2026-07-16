@@ -1,11 +1,9 @@
 name: Pralkowcy Elektorda Scraper + Analyzer + Validator
 
 on:
-  schedule:
-    # 02:00 UTC = 03:00 CET (Europa)
-    - cron: '0 2 * * *'
-  workflow_dispatch:  # Manual trigger
-
+  # schedule:
+  #   - cron: '0 2 * * *'  # Manual trigger
+  workflow_dispatch:
 env:
   PYTHON_VERSION: '3.11'
 
